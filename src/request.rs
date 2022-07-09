@@ -1,6 +1,7 @@
 use paho_mqtt::QOS_2;
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use url::{ParseError, Url};
 
 #[derive(Deserialize, PartialEq, Debug)]
@@ -25,8 +26,11 @@ impl IntoIterator for PublishRequest {
 
 #[derive(Deserialize, PartialEq, Debug)]
 pub struct Publish {
-    #[serde(alias = "host", alias = "hostname")]
-    #[serde(deserialize_with = "Publish::deserialize_broker")]
+    #[serde(
+        alias = "host",
+        alias = "hostname",
+        deserialize_with = "Publish::deserialize_broker"
+    )]
     pub broker: Url,
     #[serde(flatten)]
     pub credentials: Option<Credentials>,
@@ -88,16 +92,17 @@ impl IntoIterator for MessagePublish {
     }
 }
 
-#[derive(Deserialize, PartialEq, Debug)]
+#[derive(PartialEq, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub topic: String,
-    #[serde(default)]
-    payload: String,
+    payload: Option<Value>,
     #[serde(default)]
     payload_type: PayloadType,
-    #[serde(default = "Message::default_qos")]
-    #[serde(deserialize_with = "Message::deserialize_qos")]
+    #[serde(
+        default = "Message::default_qos",
+        deserialize_with = "Message::deserialize_qos"
+    )]
     pub qos: i32,
 }
 
@@ -122,10 +127,18 @@ impl Message {
     }
 
     pub fn payload(self) -> Option<Vec<u8>> {
-        match self.payload_type {
-            PayloadType::String => Some(self.payload.into_bytes()),
-            PayloadType::Base64 => base64::decode(self.payload).ok(),
-        }
+        let payload = match self.payload {
+            Some(payload) => payload,
+            None => return Some(Vec::new()),
+        };
+        Some(match (self.payload_type, payload) {
+            (PayloadType::String, Value::String(s)) => s.into_bytes(),
+            (PayloadType::String, Value::Number(n)) => n.to_string().into_bytes(),
+            (PayloadType::Json, v) => v.to_string().into_bytes(),
+            (PayloadType::Base64, Value::String(d)) => base64::decode(&d).ok()?,
+            (_, Value::Null) => Vec::new(),
+            _ => return None,
+        })
     }
 }
 
@@ -145,25 +158,26 @@ impl Default for Message {
 enum PayloadType {
     #[default]
     String,
+    Json,
     Base64,
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{Credentials, Message, MessagePublish, PayloadType, Publish, PublishRequest};
+    use serde_json::json;
     use serde_json::Value;
-
-    use super::PublishRequest;
 
     fn json_req(json: Value) -> Option<PublishRequest> {
         serde_json::from_value(json).ok()
     }
 
+    fn json_message(json: Value) -> Option<Message> {
+        serde_json::from_value(json).ok()
+    }
+
     mod deserialize {
-        use super::super::PayloadType;
-        use super::super::{Credentials, Message, MessagePublish};
-        use super::super::{Publish, PublishRequest};
-        use super::json_req;
-        use serde_json::json;
+        use super::*;
 
         #[test]
         fn single_simple() {
@@ -332,12 +346,12 @@ mod tests {
                         messages: vec![
                             Message {
                                 topic: "door".to_owned(),
-                                payload: "open".to_owned(),
+                                payload: Some("open".into()),
                                 ..Default::default()
                             },
                             Message {
                                 topic: "light".to_owned(),
-                                payload: "off".to_owned(),
+                                payload: Some("off".into()),
                                 ..Default::default()
                             }
                         ]
@@ -375,6 +389,73 @@ mod tests {
                     })
                 })
             );
+        }
+    }
+
+    mod payloads {
+        use super::*;
+
+        #[test]
+        fn string() {
+            assert_eq!(
+                json_message(json!({
+                    "topic": "door",
+                    "payloadType": "string",
+                    "payload": "open",
+                }))
+                .unwrap()
+                .payload()
+                .as_deref(),
+                Some("open".as_bytes())
+            );
+        }
+
+        #[test]
+        fn json() {
+            assert_eq!(
+                json_message(json!({
+                    "topic": "door",
+                    "payloadType": "json",
+                    "payload": {
+                        "door": 2,
+                        "open": true,
+                    },
+                }))
+                .unwrap()
+                .payload()
+                .as_deref(),
+                Some(
+                    json!({
+                        "door": 2,
+                        "open": true,
+                    })
+                    .to_string()
+                    .as_bytes()
+                )
+            );
+        }
+
+        #[test]
+        fn base64() {
+            assert_eq!(
+                json_message(json!({
+                    "topic": "door",
+                    "payloadType": "base64",
+                    "payload": "AAEC",
+                }))
+                .unwrap()
+                .payload(),
+                Some(vec![0, 1, 2])
+            );
+        }
+
+        #[test]
+        fn invalid_type() {
+            assert!(json_message(json!({
+                "topic": "door",
+                "payloadType": "unknown",
+            }))
+            .is_none());
         }
     }
 }
