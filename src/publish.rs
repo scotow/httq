@@ -1,4 +1,3 @@
-use crate::misc::header_str;
 use axum::body::{Body, Bytes};
 use axum::extract::{ContentLengthLimit, FromRequest, RequestParts};
 use axum::http::{header, StatusCode, Uri};
@@ -7,7 +6,9 @@ use paho_mqtt::QOS_2;
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use url::{ParseError, Url};
+use url::{ParseError as UrlParseError, Url};
+
+use crate::misc::header_str;
 
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(untagged)]
@@ -40,9 +41,10 @@ impl FromRequest<Body> for PublishRequest {
                 .map_err(|_| StatusCode::BAD_REQUEST)
                 .map(|data| data.0 .0)
         } else {
-            let broker = header_str(req, "X-Broker")
-                .and_then(|uri| uri.parse().ok())
-                .ok_or(StatusCode::BAD_REQUEST)?;
+            let broker = Broker::parse_url_with_default(
+                header_str(req, "X-Broker").ok_or(StatusCode::BAD_REQUEST)?,
+            )
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
             let credentials = header_str(req, "X-Username").and_then(|username| {
                 Some(Credentials {
                     username: username.to_owned(),
@@ -64,8 +66,7 @@ impl FromRequest<Body> for PublishRequest {
                 credentials,
                 messages: MessageGroup::Single(Message {
                     topic,
-                    payload: Some(base64::encode(&payload).into()),
-                    payload_type: PayloadType::Base64,
+                    payload: Some(Payload::Specified(TypedPayload::Raw(payload.to_vec()))),
                     qos: QOS_2,
                 }),
             }))
@@ -89,27 +90,22 @@ pub struct Broker {
 }
 
 impl Broker {
+    fn parse_url_with_default(input: &str) -> Result<Url, UrlParseError> {
+        match input.parse() {
+            Ok(url) => Ok(url),
+            Err(UrlParseError::RelativeUrlWithoutBase) => format!("tcp://{}", input).parse(),
+            Err(err) => Err(err),
+        }
+    }
+
     fn deserialize_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
     where
         D: Deserializer<'de>,
     {
         let input = String::deserialize(deserializer)?;
-        match input.parse() {
-            Ok(url) => Ok(url),
-            Err(ParseError::RelativeUrlWithoutBase) => {
-                let with_tcp = format!("tcp://{}", input);
-                with_tcp.parse::<Url>().map_err(|err| {
-                    serde::de::Error::invalid_value(
-                        Unexpected::Str(&input),
-                        &err.to_string().as_str(),
-                    )
-                })
-            }
-            Err(err) => Err(serde::de::Error::invalid_value(
-                Unexpected::Str(&input),
-                &err.to_string().as_str(),
-            )),
-        }
+        Self::parse_url_with_default(&input).map_err(|err| {
+            serde::de::Error::invalid_value(Unexpected::Str(&input), &err.to_string().as_str())
+        })
     }
 }
 
@@ -146,9 +142,8 @@ impl IntoIterator for MessageGroup {
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub topic: String,
-    payload: Option<Value>,
-    #[serde(default)]
-    payload_type: PayloadType,
+    #[serde(flatten)]
+    payload: Option<Payload>,
     #[serde(
         default = "Message::default_qos",
         deserialize_with = "Message::deserialize_qos"
@@ -181,13 +176,12 @@ impl Message {
             Some(payload) => payload,
             None => return Some(Vec::new()),
         };
-        Some(match (self.payload_type, payload) {
-            (PayloadType::String, Value::String(s)) => s.into_bytes(),
-            (PayloadType::String, Value::Number(n)) => n.to_string().into_bytes(),
-            (PayloadType::Json, v) => v.to_string().into_bytes(),
-            (PayloadType::Base64, Value::String(d)) => base64::decode(&d).ok()?,
-            (_, Value::Null) => Vec::new(),
-            _ => return None,
+        Some(match payload {
+            Payload::Specified(TypedPayload::String(s)) => s.into_bytes(),
+            Payload::Specified(TypedPayload::Json(v)) => v.to_string().into_bytes(),
+            Payload::Specified(TypedPayload::Base64(d)) => base64::decode(&d).ok()?,
+            Payload::Specified(TypedPayload::Raw(d)) => d,
+            Payload::Unspecified { payload: s } => s.into_bytes(),
         })
     }
 }
@@ -195,28 +189,35 @@ impl Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
-            topic: "".to_owned(),
+            topic: Default::default(),
             payload: Default::default(),
-            payload_type: Default::default(),
             qos: QOS_2,
         }
     }
 }
 
-#[derive(Deserialize, PartialEq, Default, Debug)]
-#[serde(rename_all = "camelCase")]
-enum PayloadType {
-    #[default]
-    String,
-    Json,
-    Base64,
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(untagged)]
+enum Payload {
+    Specified(TypedPayload), // Must be first, or it will match Unspecified every time.
+    Unspecified { payload: String },
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(tag = "payloadType", content = "payload", rename_all = "camelCase")]
+enum TypedPayload {
+    String(String),
+    Json(Value),
+    Base64(String),
+    Raw(Vec<u8>),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Broker, Credentials, Message, MessageGroup, PayloadType, PublishRequest};
     use serde_json::json;
     use serde_json::Value;
+
+    use super::{Broker, Credentials, Message, MessageGroup, PublishRequest};
 
     fn json_req(json: Value) -> Option<PublishRequest> {
         serde_json::from_value(json).ok()
@@ -227,6 +228,8 @@ mod tests {
     }
 
     mod deserialize {
+        use crate::publish::{Payload, TypedPayload};
+
         use super::*;
 
         #[test]
@@ -380,11 +383,9 @@ mod tests {
                     "messages": [
                         {
                             "topic": "door",
-                            "payload": "open",
                         },
                         {
                             "topic": "light",
-                            "payload": "off",
                         }
                     ]
                 }))
@@ -396,16 +397,59 @@ mod tests {
                         messages: vec![
                             Message {
                                 topic: "door".to_owned(),
-                                payload: Some("open".into()),
                                 ..Default::default()
                             },
                             Message {
                                 topic: "light".to_owned(),
-                                payload: Some("off".into()),
                                 ..Default::default()
                             }
                         ]
                     }
+                })
+            );
+        }
+
+        #[test]
+        fn payload_untyped() {
+            assert_eq!(
+                json_req(json!({
+                    "hostname": "broker.com",
+                    "topic": "door",
+                    "payload": "open",
+                }))
+                .unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
+                    credentials: None,
+                    messages: MessageGroup::Single(Message {
+                        topic: "door".to_owned(),
+                        payload: Some(Payload::Unspecified {
+                            payload: "open".to_owned(),
+                        }),
+                        ..Default::default()
+                    })
+                })
+            );
+        }
+
+        #[test]
+        fn payload_typed() {
+            assert_eq!(
+                json_req(json!({
+                    "hostname": "broker.com",
+                    "topic": "door",
+                    "payload": "open",
+                    "payloadType": "string",
+                }))
+                .unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
+                    credentials: None,
+                    messages: MessageGroup::Single(Message {
+                        topic: "door".to_owned(),
+                        payload: Some(Payload::Specified(TypedPayload::String("open".to_owned()))),
+                        ..Default::default()
+                    })
                 })
             );
         }
@@ -419,31 +463,36 @@ mod tests {
             }))
             .is_none());
         }
-
-        #[test]
-        fn base64() {
-            assert_eq!(
-                json_req(json!({
-                    "hostname": "broker.com",
-                    "topic": "door",
-                    "payloadType": "base64",
-                }))
-                .unwrap(),
-                PublishRequest::Single(Broker {
-                    url: "tcp://broker.com".parse().unwrap(),
-                    credentials: None,
-                    messages: MessageGroup::Single(Message {
-                        topic: "door".to_owned(),
-                        payload_type: PayloadType::Base64,
-                        ..Default::default()
-                    })
-                })
-            );
-        }
     }
 
     mod payloads {
         use super::*;
+
+        #[test]
+        fn none() {
+            assert_eq!(
+                json_message(json!({
+                    "topic": "door",
+                }))
+                .unwrap()
+                .payload(),
+                Some(Vec::new())
+            );
+        }
+
+        #[test]
+        fn auto_string() {
+            assert_eq!(
+                json_message(json!({
+                    "topic": "door",
+                    "payload": "open",
+                }))
+                .unwrap()
+                .payload()
+                .as_deref(),
+                Some("open".as_bytes())
+            );
+        }
 
         #[test]
         fn string() {
@@ -500,12 +549,18 @@ mod tests {
         }
 
         #[test]
-        fn invalid_type() {
-            assert!(json_message(json!({
-                "topic": "door",
-                "payloadType": "unknown",
-            }))
-            .is_none());
+        fn default_to_string() {
+            assert_eq!(
+                json_message(json!({
+                    "topic": "door",
+                    "payloadType": "unknown",
+                    "payload": "open"
+                }))
+                .unwrap()
+                .payload()
+                .as_deref(),
+                Some("open".as_bytes())
+            );
         }
     }
 }
