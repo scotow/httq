@@ -1,3 +1,8 @@
+use crate::misc::header_str;
+use axum::body::{Body, Bytes};
+use axum::extract::{ContentLengthLimit, FromRequest, RequestParts};
+use axum::http::{header, StatusCode, Uri};
+use axum::{async_trait, Json};
 use paho_mqtt::QOS_2;
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
@@ -7,12 +12,12 @@ use url::{ParseError, Url};
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(untagged)]
 pub enum PublishRequest {
-    Single(Publish),
-    Multiple(Vec<Publish>),
+    Single(Broker),
+    Multiple(Vec<Broker>),
 }
 
 impl IntoIterator for PublishRequest {
-    type Item = Publish;
+    type Item = Broker;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -24,22 +29,67 @@ impl IntoIterator for PublishRequest {
     }
 }
 
+#[async_trait]
+impl FromRequest<Body> for PublishRequest {
+    type Rejection = StatusCode;
+
+    async fn from_request(req: &mut RequestParts<Body>) -> Result<Self, Self::Rejection> {
+        if header_str(req, header::CONTENT_TYPE) == Some("application/json") {
+            ContentLengthLimit::<Json<PublishRequest>, 16_777_216>::from_request(req)
+                .await
+                .map_err(|_| StatusCode::BAD_REQUEST)
+                .map(|data| data.0 .0)
+        } else {
+            let broker = header_str(req, "X-Broker")
+                .and_then(|uri| uri.parse().ok())
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let credentials = header_str(req, "X-Username").and_then(|username| {
+                Some(Credentials {
+                    username: username.to_owned(),
+                    password: header_str(req, "X-Password")?.to_owned(),
+                })
+            });
+            let topic = Uri::from_request(req)
+                .await
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .path()
+                .trim_start_matches('/')
+                .to_owned();
+            let ContentLengthLimit(payload) =
+                ContentLengthLimit::<Bytes, 16_777_216>::from_request(req)
+                    .await
+                    .map_err(|_| StatusCode::BAD_REQUEST)?;
+            Ok(Self::Single(Broker {
+                url: broker,
+                credentials,
+                messages: MessageGroup::Single(Message {
+                    topic,
+                    payload: Some(base64::encode(&payload).into()),
+                    payload_type: PayloadType::Base64,
+                    qos: QOS_2,
+                }),
+            }))
+        }
+    }
+}
+
 #[derive(Deserialize, PartialEq, Debug)]
-pub struct Publish {
+pub struct Broker {
     #[serde(
+        alias = "broker",
         alias = "host",
         alias = "hostname",
-        deserialize_with = "Publish::deserialize_broker"
+        deserialize_with = "Broker::deserialize_url"
     )]
-    pub broker: Url,
+    pub url: Url,
     #[serde(flatten)]
     pub credentials: Option<Credentials>,
     #[serde(flatten)]
-    pub messages: MessagePublish,
+    pub messages: MessageGroup,
 }
 
-impl Publish {
-    fn deserialize_broker<'de, D>(deserializer: D) -> Result<Url, D::Error>
+impl Broker {
+    fn deserialize_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -71,7 +121,7 @@ pub struct Credentials {
 
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(untagged)]
-pub enum MessagePublish {
+pub enum MessageGroup {
     Single(Message),
     #[serde(alias = "message")]
     Multiple {
@@ -79,7 +129,7 @@ pub enum MessagePublish {
     },
 }
 
-impl IntoIterator for MessagePublish {
+impl IntoIterator for MessageGroup {
     type Item = Message;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
@@ -164,7 +214,7 @@ enum PayloadType {
 
 #[cfg(test)]
 mod tests {
-    use super::{Credentials, Message, MessagePublish, PayloadType, Publish, PublishRequest};
+    use super::{Broker, Credentials, Message, MessageGroup, PayloadType, PublishRequest};
     use serde_json::json;
     use serde_json::Value;
 
@@ -187,10 +237,10 @@ mod tests {
                     "topic": "door",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -208,10 +258,10 @@ mod tests {
                     }
                 ]))
                 .unwrap(),
-                PublishRequest::Multiple(vec![Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Multiple(vec![Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -227,10 +277,10 @@ mod tests {
                     "topic": "door",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -246,10 +296,10 @@ mod tests {
                     "topic": "door",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "ws://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "ws://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -267,13 +317,13 @@ mod tests {
                     "topic": "door",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: Some(Credentials {
                         username: "user_1".to_owned(),
                         password: "qwerty123".to_owned(),
                     }),
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -290,10 +340,10 @@ mod tests {
                     "topic": "door",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -310,10 +360,10 @@ mod tests {
                     "topic": "door",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         ..Default::default()
                     })
@@ -339,10 +389,10 @@ mod tests {
                     ]
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Multiple {
+                    messages: MessageGroup::Multiple {
                         messages: vec![
                             Message {
                                 topic: "door".to_owned(),
@@ -379,10 +429,10 @@ mod tests {
                     "payloadType": "base64",
                 }))
                 .unwrap(),
-                PublishRequest::Single(Publish {
-                    broker: "tcp://broker.com".parse().unwrap(),
+                PublishRequest::Single(Broker {
+                    url: "tcp://broker.com".parse().unwrap(),
                     credentials: None,
-                    messages: MessagePublish::Single(Message {
+                    messages: MessageGroup::Single(Message {
                         topic: "door".to_owned(),
                         payload_type: PayloadType::Base64,
                         ..Default::default()
