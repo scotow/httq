@@ -1,10 +1,12 @@
-use axum::body::{Body, Bytes};
-use axum::extract::{ContentLengthLimit, FromRequest, RequestParts};
-use axum::http::{header, StatusCode, Uri};
-use axum::{async_trait, Json};
+use axum::{
+    async_trait,
+    body::{Body, Bytes},
+    extract::{ContentLengthLimit, FromRequest, RequestParts},
+    http::{header, StatusCode, Uri},
+    Json,
+};
 use paho_mqtt::QOS_2;
-use serde::de::Unexpected;
-use serde::{Deserialize, Deserializer};
+use serde::{de::Unexpected, Deserialize, Deserializer};
 use serde_json::Value;
 use url::{ParseError as UrlParseError, Url};
 
@@ -214,8 +216,7 @@ enum TypedPayload {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     use super::{Broker, Credentials, Message, MessageGroup, PublishRequest};
 
@@ -228,9 +229,8 @@ mod tests {
     }
 
     mod deserialize {
-        use crate::publish::{Payload, TypedPayload};
-
         use super::*;
+        use crate::publish::{Payload, TypedPayload};
 
         #[test]
         fn single_simple() {

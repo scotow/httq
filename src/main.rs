@@ -1,12 +1,11 @@
-use crate::publish::{Credentials, PublishRequest};
-use axum::handler::Handler;
-use axum::http::StatusCode;
-use axum::{Router, Server};
+use std::{error::Error, net::SocketAddr};
+
+use axum::{handler::Handler, http::StatusCode, Router, Server};
 use paho_mqtt::{
     AsyncClient, ConnectOptions, ConnectOptionsBuilder, CreateOptionsBuilder, Message,
 };
-use std::error::Error;
-use std::net::SocketAddr;
+
+use crate::publish::{Credentials, PublishRequest};
 
 mod misc;
 mod publish;
