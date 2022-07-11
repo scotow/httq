@@ -2,7 +2,7 @@
 
 📬 A HTTP to MQTT proxy 📬 
 
-## JSON
+## JSON Publish
 
 Supported JSON format (all formats bellow are valid, some just use the default values):
 
@@ -89,9 +89,9 @@ Supported JSON format (all formats bellow are valid, some just use the default v
 {
   "broker": "broker.com",
   "topic": "door",
-  "payloadType": "base64",
+  "payloadType": "json",
   "payload": {
-    "door": 1,
+    "doorNumber": 1,
     "state": "open"
   }
 }
@@ -124,7 +124,7 @@ Supported JSON format (all formats bellow are valid, some just use the default v
 }
 ```
 
-## HTTP headers + body
+## HTTP headers + Body Publish
 
 Only one message can be sent per request:
 
@@ -143,6 +143,18 @@ is equivalent to:
   "payload": "open"
 }
 ```
+
+## HTTP headers + Subscribe
+
+Only one message can be received per request:
+
+```sh
+curl -H 'X-Broker: broker.com' -H 'X-Username: user1' -H 'X-Password: qwerty' -H 'Accept: text/plain' localhost:8080/door
+```
+
+will wait up to 5 min for a message on the `door` topic and will return the payload in the response's body.
+
+Specifying `Accept: plain/text` will cast / force the message's payload to be cast to a string, discarding invalid UTF-8 parts. 
 
 ## Limitations
 
