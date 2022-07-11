@@ -1,12 +1,24 @@
-use std::{error::Error, net::SocketAddr};
+use std::{error::Error, net::SocketAddr, time::Duration};
 
-use axum::{handler::Handler, http::StatusCode, Router, Server};
+use axum::{
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+    Router, Server,
+};
+use futures_util::StreamExt;
 use paho_mqtt::{
-    AsyncClient, ConnectOptions, ConnectOptionsBuilder, CreateOptionsBuilder, Message,
+    AsyncClient, ConnectOptions, ConnectOptionsBuilder, CreateOptionsBuilder, Message, QOS_2,
+};
+use tokio::time::timeout;
+
+use crate::{
+    connect_info::{ConnectInfo, Credentials, Topic},
+    misc::header_str,
+    publish::PublishRequest,
 };
 
-use crate::publish::{Credentials, PublishRequest};
-
+mod connect_info;
 mod misc;
 mod publish;
 
@@ -16,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .http1_title_case_headers(true)
         .serve(
             Router::new()
-                .fallback(publish_handler.into_service())
+                .route("/*topic", post(publish_handler).get(subscribe_handler))
                 .into_make_service(),
         )
         .await?;
@@ -64,4 +76,53 @@ async fn publish_handler(req: PublishRequest) -> Result<StatusCode, StatusCode> 
     }
 
     Ok(StatusCode::OK)
+}
+
+async fn subscribe_handler(
+    connect_info: ConnectInfo,
+    Topic(topic): Topic,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let mut client = AsyncClient::new(
+        CreateOptionsBuilder::new()
+            .server_uri(connect_info.broker)
+            .finalize(),
+    )
+    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let opts = match connect_info.credentials {
+        Some(Credentials { username, password }) => ConnectOptionsBuilder::new()
+            .user_name(username)
+            .password(password)
+            .finalize(),
+        None => ConnectOptions::new(),
+    };
+
+    let mut stream = client.get_stream(1);
+    client
+        .connect(opts)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    client
+        .subscribe(topic, QOS_2)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let message = timeout(Duration::from_secs(5 * 60), stream.next())
+        .await
+        .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+        .flatten()
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    Ok(
+        if header_str(&headers, header::ACCEPT) == Some("text/plain") {
+            (
+                [(header::CONTENT_TYPE, "text/plain")],
+                message.payload_str().into_owned(),
+            )
+                .into_response()
+        } else {
+            message.payload().to_vec().into_response()
+        },
+    )
 }

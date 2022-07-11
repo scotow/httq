@@ -2,15 +2,18 @@ use axum::{
     async_trait,
     body::{Body, Bytes},
     extract::{ContentLengthLimit, FromRequest, RequestParts},
-    http::{header, StatusCode, Uri},
+    http::{header, StatusCode},
     Json,
 };
 use paho_mqtt::QOS_2;
 use serde::{de::Unexpected, Deserialize, Deserializer};
 use serde_json::Value;
-use url::{ParseError as UrlParseError, Url};
+use url::Url;
 
-use crate::misc::header_str;
+use crate::{
+    connect_info::{ConnectInfo, Credentials, Topic},
+    misc::{header_str, parse_url_with_default},
+};
 
 const MAX_PAYLOAD_SIZE: u64 = 16_777_216;
 
@@ -39,28 +42,17 @@ impl FromRequest<Body> for PublishRequest {
     type Rejection = StatusCode;
 
     async fn from_request(req: &mut RequestParts<Body>) -> Result<Self, Self::Rejection> {
-        if header_str(req, header::CONTENT_TYPE) == Some("application/json") {
+        if header_str(req.headers(), header::CONTENT_TYPE) == Some("application/json") {
             ContentLengthLimit::<Json<PublishRequest>, MAX_PAYLOAD_SIZE>::from_request(req)
                 .await
                 .map_err(|_| StatusCode::BAD_REQUEST)
                 .map(|data| data.0 .0)
         } else {
-            let broker = Broker::parse_url_with_default(
-                header_str(req, "X-Broker").ok_or(StatusCode::BAD_REQUEST)?,
-            )
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-            let credentials = header_str(req, "X-Username").and_then(|username| {
-                Some(Credentials {
-                    username: username.to_owned(),
-                    password: header_str(req, "X-Password")?.to_owned(),
-                })
-            });
-            let topic = Uri::from_request(req)
-                .await
-                .map_err(|_| StatusCode::BAD_REQUEST)?
-                .path()
-                .trim_start_matches('/')
-                .to_owned();
+            let ConnectInfo {
+                broker,
+                credentials,
+            } = ConnectInfo::from_request(req).await?;
+            let Topic(topic) = Topic::from_request(req).await?;
             let ContentLengthLimit(payload) =
                 ContentLengthLimit::<Bytes, MAX_PAYLOAD_SIZE>::from_request(req)
                     .await
@@ -94,29 +86,15 @@ pub struct Broker {
 }
 
 impl Broker {
-    fn parse_url_with_default(input: &str) -> Result<Url, UrlParseError> {
-        match input.parse() {
-            Ok(url) => Ok(url),
-            Err(UrlParseError::RelativeUrlWithoutBase) => format!("tcp://{}", input).parse(),
-            Err(err) => Err(err),
-        }
-    }
-
     fn deserialize_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
     where
         D: Deserializer<'de>,
     {
         let input = String::deserialize(deserializer)?;
-        Self::parse_url_with_default(&input).map_err(|err| {
+        parse_url_with_default(&input).map_err(|err| {
             serde::de::Error::invalid_value(Unexpected::Str(&input), &err.to_string().as_str())
         })
     }
-}
-
-#[derive(Deserialize, PartialEq, Debug)]
-pub struct Credentials {
-    pub username: String,
-    pub password: String,
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
