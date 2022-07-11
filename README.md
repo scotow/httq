@@ -159,3 +159,4 @@ Specifying `Accept: plain/text` will cast / force the message's payload to be ca
 ## Limitations
 
 - No TLS/SSL broker connection support
+- No multi-level wildcard subscribe (#)

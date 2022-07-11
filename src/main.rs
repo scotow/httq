@@ -1,7 +1,7 @@
 use std::{error::Error, net::SocketAddr, time::Duration};
 
 use axum::{
-    http::{header, HeaderMap, StatusCode},
+    http::{header, header::HeaderName, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Router, Server,
@@ -117,12 +117,19 @@ async fn subscribe_handler(
     Ok(
         if header_str(&headers, header::ACCEPT) == Some("text/plain") {
             (
-                [(header::CONTENT_TYPE, "text/plain")],
+                [
+                    (header::CONTENT_TYPE, "text/plain"),
+                    (HeaderName::from_static("x-topic"), message.topic()),
+                ],
                 message.payload_str().into_owned(),
             )
                 .into_response()
         } else {
-            message.payload().to_vec().into_response()
+            (
+                [(HeaderName::from_static("x-topic"), message.topic())],
+                message.payload().to_vec(),
+            )
+                .into_response()
         },
     )
 }
