@@ -2,7 +2,7 @@ use axum::{
     async_trait,
     body::{Body, Bytes},
     extract::{ContentLengthLimit, FromRequest, RequestParts},
-    http::{header, StatusCode},
+    http::header,
     Json,
 };
 use paho_mqtt::QOS_2;
@@ -13,6 +13,7 @@ use url::Url;
 use crate::{
     connect_info::{ConnectInfo, Credentials, Topic},
     misc::{header_str, parse_url_with_default},
+    Error,
 };
 
 const MAX_PAYLOAD_SIZE: u64 = 16_777_216;
@@ -39,13 +40,13 @@ impl IntoIterator for PublishRequest {
 
 #[async_trait]
 impl FromRequest<Body> for PublishRequest {
-    type Rejection = StatusCode;
+    type Rejection = Error;
 
     async fn from_request(req: &mut RequestParts<Body>) -> Result<Self, Self::Rejection> {
         if header_str(req.headers(), header::CONTENT_TYPE) == Some("application/json") {
             ContentLengthLimit::<Json<PublishRequest>, MAX_PAYLOAD_SIZE>::from_request(req)
                 .await
-                .map_err(|_| StatusCode::BAD_REQUEST)
+                .map_err(|_| Error::JsonFormat)
                 .map(|data| data.0 .0)
         } else {
             let ConnectInfo {
@@ -56,7 +57,7 @@ impl FromRequest<Body> for PublishRequest {
             let ContentLengthLimit(payload) =
                 ContentLengthLimit::<Bytes, MAX_PAYLOAD_SIZE>::from_request(req)
                     .await
-                    .map_err(|_| StatusCode::BAD_REQUEST)?;
+                    .map_err(|_| Error::BodySize)?;
             Ok(Self::Single(Broker {
                 url: broker,
                 credentials,
