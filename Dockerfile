@@ -1,4 +1,4 @@
-FROM rust:1.62-slim AS builder
+FROM rust:1.68-slim AS builder
 
 RUN apt update && apt install -y cmake
 
