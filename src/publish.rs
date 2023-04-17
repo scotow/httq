@@ -5,6 +5,7 @@ use axum::{
     http::header,
     Json,
 };
+use base64::engine::{general_purpose::STANDARD as BASE64, Engine as _};
 use paho_mqtt::QOS_2;
 use serde::{de::Unexpected, Deserialize, Deserializer};
 use serde_json::Value;
@@ -166,7 +167,7 @@ impl Message {
         Some(match payload {
             Payload::Specified(TypedPayload::String(s)) => s.into_bytes(),
             Payload::Specified(TypedPayload::Json(v)) => v.to_string().into_bytes(),
-            Payload::Specified(TypedPayload::Base64(d)) => base64::decode(&d).ok()?,
+            Payload::Specified(TypedPayload::Base64(d)) => BASE64.decode(&d).ok()?,
             Payload::Specified(TypedPayload::Raw(d)) => d,
             Payload::Unspecified { payload: s } => s.into_bytes(),
         })

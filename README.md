@@ -29,13 +29,6 @@ Supported JSON format (all formats bellow are valid, some just use the default v
 }
 ```
 
-```json
-{
-  "broker": "broker.com",
-  "topic": "door"
-}
-```
-
 ### Credentials:
 
 ```json
@@ -149,7 +142,7 @@ is equivalent to:
 Only one message can be received per request:
 
 ```sh
-curl -H 'X-Broker: broker.com' -H 'X-Username: user1' -H 'X-Password: qwerty' -H 'Accept: text/plain' localhost:8080/door
+curl -X GET -H 'X-Broker: broker.com' -H 'X-Username: user1' -H 'X-Password: qwerty' -H 'Accept: text/plain' localhost:8080/door
 ```
 
 will wait up to 5 min for a message on the `door` topic and will return the payload in the response's body.
