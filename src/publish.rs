@@ -2,6 +2,7 @@ use axum::{
     async_trait,
     body::{Body, Bytes},
     extract::{ContentLengthLimit, FromRequest, RequestParts},
+    http,
     http::header,
     Json,
 };
@@ -55,10 +56,15 @@ impl FromRequest<Body> for PublishRequest {
                 credentials,
             } = ConnectInfo::from_request(req).await?;
             let Topic(topic) = Topic::from_request(req).await?;
-            let ContentLengthLimit(payload) =
+            let payload = if req.headers().contains_key(http::header::CONTENT_LENGTH) {
                 ContentLengthLimit::<Bytes, MAX_PAYLOAD_SIZE>::from_request(req)
                     .await
-                    .map_err(|_| Error::BodySize)?;
+                    .map_err(|_| Error::BodySize)?
+                    .0
+            } else {
+                Bytes::new()
+            };
+
             Ok(Self::Single(Broker {
                 url: broker,
                 credentials,
