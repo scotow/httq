@@ -1,6 +1,7 @@
 use std::{error::Error as StdError, net::SocketAddr, time::Duration};
 
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, header::HeaderName, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -24,13 +25,17 @@ mod error;
 mod misc;
 mod publish;
 
+const MAX_PAYLOAD_SIZE: usize = 16_777_216;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn StdError + Send + Sync>> {
     Server::bind(&SocketAddr::new("0.0.0.0".parse()?, 8080))
         .http1_title_case_headers(true)
         .serve(
             Router::new()
+                .route("/", post(publish_handler).get(subscribe_handler))
                 .route("/*topic", post(publish_handler).get(subscribe_handler))
+                .layer(DefaultBodyLimit::max(MAX_PAYLOAD_SIZE))
                 .into_make_service(),
         )
         .await?;

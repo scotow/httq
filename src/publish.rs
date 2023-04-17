@@ -1,10 +1,9 @@
 use axum::{
     async_trait,
     body::{Body, Bytes},
-    extract::{ContentLengthLimit, FromRequest, RequestParts},
-    http,
-    http::header,
-    Json,
+    extract::FromRequest,
+    http::{header, Request},
+    Json, RequestExt,
 };
 use base64::engine::{general_purpose::STANDARD as BASE64, Engine as _};
 use paho_mqtt::QOS_2;
@@ -17,8 +16,6 @@ use crate::{
     misc::{header_str, parse_url_with_default},
     Error,
 };
-
-const MAX_PAYLOAD_SIZE: u64 = 16_777_216;
 
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(untagged)]
@@ -41,26 +38,25 @@ impl IntoIterator for PublishRequest {
 }
 
 #[async_trait]
-impl FromRequest<Body> for PublishRequest {
+impl FromRequest<(), Body> for PublishRequest {
     type Rejection = Error;
 
-    async fn from_request(req: &mut RequestParts<Body>) -> Result<Self, Self::Rejection> {
+    async fn from_request(mut req: Request<Body>, _state: &()) -> Result<Self, Self::Rejection> {
         if header_str(req.headers(), header::CONTENT_TYPE) == Some("application/json") {
-            ContentLengthLimit::<Json<PublishRequest>, MAX_PAYLOAD_SIZE>::from_request(req)
+            Json::<PublishRequest>::from_request(req, &())
                 .await
                 .map_err(|_| Error::JsonFormat)
-                .map(|data| data.0 .0)
+                .map(|data| data.0)
         } else {
             let ConnectInfo {
                 broker,
                 credentials,
-            } = ConnectInfo::from_request(req).await?;
-            let Topic(topic) = Topic::from_request(req).await?;
-            let payload = if req.headers().contains_key(http::header::CONTENT_LENGTH) {
-                ContentLengthLimit::<Bytes, MAX_PAYLOAD_SIZE>::from_request(req)
+            } = req.extract_parts().await?;
+            let Topic(topic) = req.extract_parts().await?;
+            let payload = if req.headers().contains_key(header::CONTENT_LENGTH) {
+                Bytes::from_request(req, &())
                     .await
                     .map_err(|_| Error::BodySize)?
-                    .0
             } else {
                 Bytes::new()
             };

@@ -1,8 +1,7 @@
 use axum::{
     async_trait,
-    body::Body,
-    extract::{FromRequest, RequestParts},
-    http::Uri,
+    extract::FromRequestParts,
+    http::{request::Parts, Uri},
 };
 use serde::Deserialize;
 use url::Url;
@@ -18,19 +17,19 @@ pub struct ConnectInfo {
 }
 
 #[async_trait]
-impl FromRequest<Body> for ConnectInfo {
+impl FromRequestParts<()> for ConnectInfo {
     type Rejection = Error;
 
-    async fn from_request(req: &mut RequestParts<Body>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &()) -> Result<Self, Self::Rejection> {
         Ok(Self {
             broker: parse_url_with_default(
-                header_str(req.headers(), "X-Broker").ok_or(Error::Header)?,
+                header_str(&parts.headers, "X-Broker").ok_or(Error::Header)?,
             )
             .map_err(|_| Error::BrokerUrl)?,
-            credentials: header_str(req.headers(), "X-Username").and_then(|username| {
+            credentials: header_str(&parts.headers, "X-Username").and_then(|username| {
                 Some(Credentials {
                     username: username.to_owned(),
-                    password: header_str(req.headers(), "X-Password")?.to_owned(),
+                    password: header_str(&parts.headers, "X-Password")?.to_owned(),
                 })
             }),
         })
@@ -46,12 +45,12 @@ pub struct Credentials {
 pub struct Topic(pub String);
 
 #[async_trait]
-impl FromRequest<Body> for Topic {
+impl FromRequestParts<()> for Topic {
     type Rejection = Error;
 
-    async fn from_request(req: &mut RequestParts<Body>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &()) -> Result<Self, Self::Rejection> {
         Ok(Self(
-            Uri::from_request(req)
+            Uri::from_request_parts(parts, &())
                 .await
                 .map_err(|_| Error::Topic)?
                 .path()
